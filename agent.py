@@ -67,6 +67,12 @@ def lade_cookies() -> list[dict]:
     raise ValueError("Unbekanntes cookies.json Format — erwartet Liste oder {cookies: [...]}")
 
 
+def speichere_cookies(cookies: list[dict]):
+    """Schreibt aktualisierte Cookies (Playwright-Format) zurück in cookies.json."""
+    with open(SESSION_FILE, "w") as f:
+        json.dump(cookies, f, indent=2)
+
+
 def cookies_playwright_format(cookies: list[dict]) -> list[dict]:
     """
     Normalisiert Cookies auf das Playwright-Format.
@@ -270,6 +276,7 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
             except Exception as e:
                 log.warning("Fehler beim Parsen eines Inserats: %s", e)
 
+        speichere_cookies(await ctx.cookies())
         await browser.close()
 
     log.info("%d eindeutige Inserate aus '%s'", len(inserate), region["name"])
@@ -304,6 +311,7 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> str:
                     beschreibung = text
                     break
 
+        speichere_cookies(await ctx.cookies())
         await browser.close()
         return beschreibung[:max_len]
 
