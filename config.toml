@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────
+# Immobilien-Agent Konfiguration
+# ─────────────────────────────────────────────
+
+# ── LLM Provider ──────────────────────────────
+[llm]
+# Verfügbare Provider: "ollama" | "claude" | "openai"
+provider = "ollama"
+
+[llm.ollama]
+model = "llama3.1:8b"
+host  = "http://localhost:11434"
+# Modellwahl nach RAM:
+#   llama3.1:8b   →  8 GB  (empfohlen für die meisten Server)
+#   mistral:7b    →  8 GB  (etwas schneller)
+#   llama3.1:70b  → 40 GB  (bessere Qualität)
+
+[llm.claude]
+model = "claude-sonnet-4-20250514"
+# API-Key aus .env: ANTHROPIC_API_KEY
+
+[llm.openai]
+model = "gpt-4o-mini"
+# API-Key aus .env: OPENAI_API_KEY
+
+
+# ── Agent-Verhalten ───────────────────────────
+[agent]
+interval_minuten          = 30    # wie oft der Agent läuft
+score_schwelle            = 6     # ab wann Telegram-Benachrichtigung (1–10)
+pause_zwischen_inseraten  = 2     # Sekunden zwischen LLM-Anfragen
+
+
+# ── Scraper ───────────────────────────────────
+[scraper]
+scroll_schritte  = 4      # wie oft die Seite nach unten gescrollt wird
+timeout_sekunden = 30     # maximale Ladezeit pro Seite
+detail_timeout   = 20     # maximale Ladezeit für Detailseiten
+max_beschreibung = 2000   # maximale Zeichenanzahl der Beschreibung
+
+
+# ── Suchregionen ──────────────────────────────
+# Mehrere Regionen möglich — einfach weiteren [[suche]]-Block hinzufügen
+[[suche]]
+name   = "Dumanjug, Cebu"
+aktiv  = true
+url    = "https://www.facebook.com/marketplace/105574099476569/search?minPrice=100&maxPrice=8000000&query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
+
+# [[suche]]
+# name  = "Moalboal, Cebu"
+# aktiv = true
+# url   = "https://www.facebook.com/marketplace/ANDERE_ID/search/?category_id=1270772586445798&query=Immobilien%20zum%20Kauf"
+
+# [[suche]]
+# name  = "Badian, Cebu"
+# aktiv = false   # deaktiviert ohne löschen
+# url   = "https://www.facebook.com/marketplace/ANDERE_ID/search/?..."
+
+[[suche]]
+name  = "San Fernando, Cebu"
+aktiv = true   # deaktiviert ohne löschen
+url   = "https://www.facebook.com/marketplace/112796322073251/search?minPrice=100&maxPrice=8000000&query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
+
+
+
+# ── Bewertungskriterien ───────────────────────
+[kriterien]
+text = """
+Ich suche eine Immobilie zum Kauf in der Region Dumanjug, Cebu, Philippinen.
+
+Meine Kriterien:
+- Preis: unter 8.000.000 PHP (ca. 80.000 EUR) bevorzugt
+- Grundstück oder Haus mit Grundstück bevorzugt (kein reines Condo)
+- Guter Zustand oder leichter Renovierungsbedarf akzeptabel
+- Meerblick oder Meeresnähe ist ein deutliches Plus
+- Mindestgröße Grundstück: 200 qm
+- Keine Hochwasserzonen oder erkennbare Rechtsstreitigkeiten
+"""

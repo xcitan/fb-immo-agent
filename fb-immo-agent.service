@@ -1,0 +1,18 @@
+[Unit]
+Description=Facebook Marketplace Immobilien-Agent
+After=network.target ollama.service
+
+[Service]
+Type=simple
+User=immo
+WorkingDirectory=/opt/fb_immo_agent
+EnvironmentFile=/opt/fb_immo_agent/.env
+ExecStart=/opt/fb_immo_agent/.venv/bin/python scheduler.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fb-immo-agent
+
+[Install]
+WantedBy=multi-user.target

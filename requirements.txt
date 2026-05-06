@@ -1,0 +1,11 @@
+# Pflicht
+playwright>=1.40.0
+playwright-stealth>=2.0.0
+python-telegram-bot>=20.0
+APScheduler>=3.10.0
+tomli>=2.0.0          # nur für Python < 3.11 nötig (3.11+ hat tomllib eingebaut)
+
+# LLM Provider — nur den benötigten Provider installieren
+ollama>=0.2.0         # für provider = "ollama"
+anthropic>=0.20.0     # für provider = "claude"
+openai>=1.0.0         # für provider = "openai"
