@@ -99,18 +99,54 @@ def cookies_playwright_format(cookies: list[dict]) -> list[dict]:
 def parse_preis_php(text: str) -> int | None:
     """
     Normalisiert FB-Marketplace-Preise zu int (PHP).
-    "₱5,000,000" → 5000000, "PHP 5M" → 5000000, "Free" → None.
+    Unterstützt US- und EU-Zahlenformat:
+      "₱5,000,000"      → 5_000_000
+      "1.760.000 PHP"   → 1_760_000   (DE: Punkt als Tausendertrenner)
+      "PHP 5M"          → 5_000_000
+      "Php 250K"        → 250_000
+      "1.5M"            → 1_500_000   (Punkt als Dezimaltrenner)
+      "Free" / ""       → None
     """
     if not text:
         return None
     match = re.search(r"[\d][\d,\.]*", text)
     if not match:
         return None
-    num_str = match.group().replace(",", "")
+    raw = match.group()
+    n_dots, n_commas = raw.count("."), raw.count(",")
+
+    if n_dots > 0 and n_commas > 0:
+        # Beides vorhanden → der spätere Separator ist der Dezimaltrenner.
+        if raw.rfind(",") > raw.rfind("."):
+            num_str = raw.replace(".", "").replace(",", ".")   # 1.234,56 (DE)
+        else:
+            num_str = raw.replace(",", "")                     # 1,234.56 (US)
+    elif n_commas > 1:
+        num_str = raw.replace(",", "")                         # 1,234,567 (US thousands)
+    elif n_dots > 1:
+        num_str = raw.replace(".", "")                         # 1.234.567 (DE thousands)
+    elif n_commas == 1:
+        # Mehrdeutig: "1,234" (US thousands) vs "1,5" (DE dezimal).
+        parts = raw.split(",")
+        if len(parts[1]) == 3 and len(parts[0]) <= 3:
+            num_str = raw.replace(",", "")
+        else:
+            num_str = raw.replace(",", ".")
+    elif n_dots == 1:
+        # Analog: "1.234" (DE thousands) vs "1.5" (US dezimal).
+        parts = raw.split(".")
+        if len(parts[1]) == 3 and len(parts[0]) <= 3:
+            num_str = raw.replace(".", "")
+        else:
+            num_str = raw
+    else:
+        num_str = raw
+
     try:
         val = float(num_str)
     except ValueError:
         return None
+
     rest = text[match.end():].strip().lower()
     if rest.startswith("m"):
         val *= 1_000_000
@@ -160,6 +196,72 @@ async def zaehle_bilder_auf_seite(page) -> int:
         # Query-Params abschneiden — FB liefert dieselbe Datei in mehreren Größen
         urls.add(src.split("?")[0])
     return len(urls)
+
+
+# Texte die als "label only" verworfen werden — die echte Beschreibung kommt danach.
+_DESC_NICHT_BESCHREIBUNG = {
+    "beschreibung", "description", "details", "weniger anzeigen", "see more",
+    "see less", "mehr anzeigen", "show more", "show less",
+}
+
+
+async def extrahiere_beschreibung(page, max_len: int) -> str:
+    """
+    Liest die Listing-Beschreibung von der Detailseite.
+    Versucht in dieser Reihenfolge:
+      1) Bekannte, stabile CSS-Selektoren (data-testid, etc.)
+      2) Label-basiert: finde Text "Beschreibung"/"Description" und nimm
+         den nachfolgenden Container (FB-Layout: Heading + Sibling-Div).
+      3) Fallback: längster zusammenhängender Textblock im Haupt-Content.
+    """
+    # ── 1. Stabile Selektoren ──────────────────────────────────────────────
+    for sel in [
+        '[data-testid="marketplace_listing_description"]',
+        'div[aria-label="Beschreibung" i]',
+        'div[aria-label="Description" i]',
+    ]:
+        el = await page.query_selector(sel)
+        if el:
+            text = (await el.inner_text()).strip()
+            if len(text) > 20:
+                return text[:max_len]
+
+    # ── 2. Label-basiert: heading "Beschreibung" → folgender Container ─────
+    # FB rendert die Section meist als <span>Beschreibung</span> mit dem
+    # eigentlichen Text im benachbarten oder umschließenden Container.
+    try:
+        beschreibung_xpath = (
+            "//*[self::span or self::h2 or self::div]"
+            "[normalize-space(text())='Beschreibung' or normalize-space(text())='Description']"
+            "/ancestor::div[position()<=3]"
+        )
+        candidates = await page.query_selector_all(f"xpath={beschreibung_xpath}")
+        for el in candidates:
+            text = (await el.inner_text()).strip()
+            # Label selbst entfernen wenn am Anfang
+            for label in ("Beschreibung\n", "Description\n"):
+                if text.startswith(label):
+                    text = text[len(label):].strip()
+            # genug Substanz und nicht nur das Label
+            if len(text) > 40 and text.lower() not in _DESC_NICHT_BESCHREIBUNG:
+                return text[:max_len]
+    except Exception as e:
+        log.debug("Label-basierte Beschreibungssuche fehlgeschlagen: %s", e)
+
+    # ── 3. Fallback: längster Text-Block aus dem Main-Bereich ──────────────
+    main = await page.query_selector('[role="main"]') or page
+    spans = await main.query_selector_all('div[dir="auto"], span[dir="auto"]')
+    bester = ""
+    for s in spans:
+        try:
+            t = (await s.inner_text()).strip()
+        except Exception:
+            continue
+        if t.lower() in _DESC_NICHT_BESCHREIBUNG:
+            continue
+        if len(t) > len(bester):
+            bester = t
+    return bester[:max_len] if len(bester) > 40 else ""
 
 
 # ─── Card-Parsing (Listings-Übersicht) ────────────────────────────────────────
@@ -521,18 +623,20 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> tuple[str, int]:
             await browser.close()
             return "", 0
 
-        beschreibung = ""
-        for sel in [
-            '[data-testid="marketplace_listing_description"]',
-            'div[class*="xz9dl7a"]',
-            'span[dir="auto"]',
-        ]:
-            el = await page.query_selector(sel)
-            if el:
-                text = await el.inner_text()
-                if len(text) > 20:
-                    beschreibung = text
+        # Versuche "Mehr anzeigen" zu klicken — FB klappt lange Beschreibungen ein.
+        try:
+            for label in ("Mehr anzeigen", "See more"):
+                btn = await page.query_selector(f'div[role="button"]:has-text("{label}")')
+                if btn:
+                    await btn.click()
+                    await asyncio.sleep(0.5)
                     break
+        except Exception as e:
+            log.debug("Konnte 'Mehr anzeigen' nicht klicken: %s", e)
+
+        beschreibung = await extrahiere_beschreibung(page, max_len)
+        if not beschreibung:
+            log.warning("⚠ Keine Beschreibung extrahiert für %s — Selektoren ggf. veraltet.", inserat_id)
 
         bilder_anzahl = await zaehle_bilder_auf_seite(page)
 
