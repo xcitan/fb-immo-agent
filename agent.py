@@ -183,19 +183,58 @@ def ort_passt(ort_im_inserat: str | None, erlaubte: list[str]) -> bool:
 
 async def zaehle_bilder_auf_seite(page) -> int:
     """
-    Zählt unterscheidbare Listing-Fotos im Haupt-Content-Bereich.
-    Grob aber robust — wir verwerfen Größenvarianten der gleichen URL.
+    Zählt Listing-Fotos auf der Detailseite.
+
+    FB rendert die Galerie als horizontalen Strip von Thumbnail-Buttons,
+    jeweils mit aria-label "Miniaturbild N" (de) bzw. "Thumbnail N" (en).
+    Dieser Container existiert für jedes Foto unabhängig davon ob das
+    innere <img> bereits geladen ist — daher der zuverlässigste Zähler.
+
+    Fallback für Listings mit nur einem Foto (kein Thumb-Strip): das
+    einzelne <img alt="Produktfoto von …"> zählen.
     """
-    main = await page.query_selector('[role="main"]') or page
-    imgs = await main.query_selector_all("img")
-    urls: set[str] = set()
-    for img in imgs:
-        src = await img.get_attribute("src") or ""
-        if "scontent" not in src:
-            continue  # Icons, Avatare die nicht über scontent kommen
-        # Query-Params abschneiden — FB liefert dieselbe Datei in mehreren Größen
-        urls.add(src.split("?")[0])
-    return len(urls)
+    js = r"""
+        () => {
+            const main = document.querySelector('[role="main"]') || document.body;
+
+            // 1) Thumbnail-Buttons zählen — eindeutiger Indikator pro Foto.
+            const THUMB_PREFIXES = ['Miniaturbild', 'Thumbnail'];
+            const thumbIndices = new Set();
+            for (const el of main.querySelectorAll('[aria-label][role="button"]')) {
+                const label = el.getAttribute('aria-label') || '';
+                for (const p of THUMB_PREFIXES) {
+                    if (label.startsWith(p + ' ')) {
+                        const n = parseInt(label.substring(p.length + 1).trim(), 10);
+                        if (!isNaN(n)) thumbIndices.add(n);
+                        break;
+                    }
+                }
+            }
+            if (thumbIndices.size > 0) return thumbIndices.size;
+
+            // 2) Fallback: 1-Foto-Listing ohne Strip — Produktfoto über alt-Prefix.
+            const PHOTO_PREFIXES = ['Produktfoto von', 'Product photo of'];
+            const groups = new Map();   // altKey → { minY, urls:Set }
+            for (const img of main.querySelectorAll('img')) {
+                const alt = img.alt || '';
+                if (!PHOTO_PREFIXES.some(p => alt.startsWith(p))) continue;
+                const key = alt.substring(0, 50);
+                const y = img.getBoundingClientRect().top + window.scrollY;
+                const src = (img.src || '').split('?')[0];
+                let g = groups.get(key);
+                if (!g) { g = { minY: y, urls: new Set() }; groups.set(key, g); }
+                if (y < g.minY) g.minY = y;
+                g.urls.add(src);
+            }
+            if (groups.size === 0) return 0;
+            let best = null;
+            for (const g of groups.values()) {
+                if (!best || g.minY < best.minY) best = g;
+            }
+            return best.urls.size;
+        }
+    """
+    return await page.evaluate(js)
 
 
 # Texte die als "label only" verworfen werden — die echte Beschreibung kommt danach.
