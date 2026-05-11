@@ -65,6 +65,26 @@ url   = "https://www.facebook.com/marketplace/112796322073251/search?minPrice=10
 
 # ── Bewertungskriterien ───────────────────────
 [kriterien]
+# Harte Filter — Inserate die diese verletzen werden VOR dem LLM-Aufruf
+# bzw. direkt nach LLM-Extraktion aussortiert (keine Telegram-Benachrichtigung).
+# Erlaubte Orte werden automatisch aus den aktiven [[suche]]-Blöcken abgeleitet
+# (Stadt-Teil vor dem ersten Komma).
+min_bilder      = 2          # Mindestanzahl Fotos auf der Detailseite
+min_flaeche_qm  = 200        # Mindestgröße Grundstück; null-Werte werden durchgelassen
+max_preis_php   = 8000000    # 8 Mio PHP ≈ 80k EUR
+min_preis_php   = 10000      # alles darunter ist Spam/Clickbait
+typen_blacklist = ["condo", "apartment", "sonstiges"]   # diese vom LLM erkannten Typen werden verworfen ("unklar" bleibt drin)
+
+# Pre-LLM Titel-Blocklist: Inserate deren Titel eines dieser Substrings (case-insensitive)
+# enthält werden sofort verworfen — spart LLM-Aufrufe für offensichtliches Rauschen.
+# Konservativ halten: nur eindeutig nicht-Immobilien-Begriffe.
+titel_blacklist = [
+    "iphone", "samsung", "honda", "toyota", "yamaha", "kawasaki", "suzuki",
+    "for hire", "looking for", "wanted to buy", "wtb",
+    "rent only", "for rent only",
+]
+
+# Weiche Kriterien — fließen in LLM-Score ein
 text = """
 Ich suche eine Immobilie zum Kauf in der Region Dumanjug, Cebu, Philippinen.
 
