@@ -147,6 +147,31 @@ def speichere_inserat(con: sqlite3.Connection, inserat: dict, provider_name: str
     con.commit()
 
 
+# ─── Login-Status-Check ───────────────────────────────────────────────────────
+
+async def ist_eingeloggt(page) -> tuple[bool, str]:
+    """
+    Prüft ob der aktuelle Page-Context bei Facebook eingeloggt ist.
+    Rückgabe: (eingeloggt, grund_falls_nicht_eingeloggt)
+    """
+    url = page.url or ""
+    if any(x in url for x in ("/login", "/checkpoint", "login.php", "/recover")):
+        return False, f"URL deutet auf Logout/Checkpoint hin: {url}"
+
+    titel = (await page.title() or "").lower()
+    if any(x in titel for x in ("log in", "log into facebook", "anmelden", "facebook – anmelden")):
+        return False, f"Seitentitel zeigt Login-Seite: {titel}"
+
+    # Login-Formular sichtbar?
+    login_form = await page.query_selector(
+        'input[name="email"], input[name="pass"], form[action*="login"]'
+    )
+    if login_form:
+        return False, "Login-Formular auf der Seite erkannt"
+
+    return True, ""
+
+
 # ─── Cookie-Check (--login) ───────────────────────────────────────────────────
 
 async def facebook_login_einmalig():
@@ -175,16 +200,18 @@ async def facebook_login_einmalig():
         page = await ctx.new_page()
         await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(3)
+        eingeloggt, grund = await ist_eingeloggt(page)
         titel = await page.title()
         url   = page.url
         await browser.close()
 
-    if "facebook.com/login" not in url and "Facebook" in titel:
+    if eingeloggt:
         log.info("✓ Cookies funktionieren — eingeloggt")
         print(f"\n✓ Login erfolgreich! Seitentitel: {titel}")
     else:
-        log.warning("✗ Cookies ungültig oder abgelaufen. URL: %s", url)
-        print(f"\n✗ Login fehlgeschlagen. URL: {url}")
+        log.warning("✗ Cookies ungültig oder abgelaufen: %s", grund)
+        print(f"\n✗ Login fehlgeschlagen: {grund}")
+        print(f"  URL: {url}")
         print("Bitte neue Cookies exportieren und cookies.json ersetzen.")
 
 
@@ -223,6 +250,17 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
         await page.goto(region["url"], wait_until="domcontentloaded", timeout=timeout)
         await asyncio.sleep(5)
 
+        # Login-Status prüfen, bevor wir 0 Treffer als "keine Inserate" interpretieren
+        eingeloggt, grund = await ist_eingeloggt(page)
+        if not eingeloggt:
+            log.error("⚠ NICHT EINGELOGGT bei Facebook (%s)", grund)
+            log.error("⚠ URL nach Navigation: %s", page.url)
+            log.error("⚠ Cookies sind ungültig oder abgelaufen — bitte cookies.json neu exportieren.")
+            log.error("⚠ Prüfen mit: python agent.py --login")
+            # WICHTIG: keine Cookies zurückschreiben — sonst überschreiben wir gute Cookies mit Logout-State.
+            await browser.close()
+            return []
+
         # Runterscrollen um mehr Inserate zu laden
         for _ in range(scroll_n):
             await page.keyboard.press("End")
@@ -230,6 +268,15 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
 
         listings = await page.query_selector_all('a[href*="/marketplace/item/"]')
         log.info("%d Listing-Links in '%s' gefunden", len(listings), region["name"])
+
+        if len(listings) == 0:
+            # Doppel-Check: vielleicht ist FB zwischen goto und scroll auf Login gerutscht.
+            eingeloggt, grund = await ist_eingeloggt(page)
+            if not eingeloggt:
+                log.error("⚠ 0 Treffer — Session während des Scrolls verloren (%s)", grund)
+                await browser.close()
+                return []
+            log.warning("0 Listings, aber noch eingeloggt — Region evtl. leer oder Selektor veraltet.")
 
         seen_ids = set()
 
@@ -276,7 +323,13 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
             except Exception as e:
                 log.warning("Fehler beim Parsen eines Inserats: %s", e)
 
-        speichere_cookies(await ctx.cookies())
+        # Nur speichern wenn wir noch eingeloggt sind — sonst überschreiben wir
+        # die guten Cookies mit Session-Cookies aus einem Logout-Redirect.
+        eingeloggt, grund = await ist_eingeloggt(page)
+        if eingeloggt:
+            speichere_cookies(await ctx.cookies())
+        else:
+            log.warning("Cookies nicht gespeichert — Session am Ende des Scrapes verloren (%s)", grund)
         await browser.close()
 
     log.info("%d eindeutige Inserate aus '%s'", len(inserate), region["name"])
@@ -298,6 +351,12 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> str:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
         await asyncio.sleep(3)
 
+        eingeloggt, grund = await ist_eingeloggt(page)
+        if not eingeloggt:
+            log.error("⚠ Detail-Scrape: nicht eingeloggt (%s)", grund)
+            await browser.close()
+            return ""
+
         beschreibung = ""
         for sel in [
             '[data-testid="marketplace_listing_description"]',
@@ -311,7 +370,10 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> str:
                     beschreibung = text
                     break
 
-        speichere_cookies(await ctx.cookies())
+        # Nur speichern wenn noch eingeloggt — gleiche Logik wie in scrape_region.
+        eingeloggt, _ = await ist_eingeloggt(page)
+        if eingeloggt:
+            speichere_cookies(await ctx.cookies())
         await browser.close()
         return beschreibung[:max_len]
 
