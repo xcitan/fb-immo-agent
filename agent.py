@@ -376,6 +376,14 @@ def speichere_inserat(con: sqlite3.Connection, inserat: dict, provider_name: str
     def _bool_to_int(v):
         return None if v is None else (1 if v else 0)
 
+    def _as_text(v):
+        """SQLite kann Listen/Dicts nicht binden — schütze TEXT-Spalten dagegen."""
+        if v is None or isinstance(v, (str, int, float)):
+            return v
+        if isinstance(v, list):
+            return " ".join(str(x) for x in v if x is not None)
+        return str(v)
+
     con.execute("""
         INSERT OR IGNORE INTO inserate
         (id, region, titel, preis, preis_php, ort, ort_im_inserat,
@@ -386,28 +394,28 @@ def speichere_inserat(con: sqlite3.Connection, inserat: dict, provider_name: str
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         inserat["id"],
-        inserat.get("region", ""),
-        inserat.get("titel", ""),
-        inserat.get("preis", ""),
+        _as_text(inserat.get("region", "")),
+        _as_text(inserat.get("titel", "")),
+        _as_text(inserat.get("preis", "")),
         inserat.get("preis_php"),
-        inserat.get("ort", ""),
-        inserat.get("ort_im_inserat"),
-        inserat.get("beschreibung", ""),
-        inserat.get("url", ""),
-        inserat.get("bild_url", ""),
+        _as_text(inserat.get("ort", "")),
+        _as_text(inserat.get("ort_im_inserat")),
+        _as_text(inserat.get("beschreibung", "")),
+        _as_text(inserat.get("url", "")),
+        _as_text(inserat.get("bild_url", "")),
         inserat.get("bilder_anzahl"),
         inserat.get("flaeche_qm"),
-        inserat.get("typ"),
+        _as_text(inserat.get("typ")),
         _bool_to_int(inserat.get("ist_zum_kauf")),
         _bool_to_int(inserat.get("ist_makler")),
-        inserat.get("meerblick"),
-        inserat.get("zustand"),
+        _as_text(inserat.get("meerblick")),
+        _as_text(inserat.get("zustand")),
         rote_flaggen,
-        inserat.get("zusammenfassung_de"),
-        inserat.get("gefiltert_grund"),
+        _as_text(inserat.get("zusammenfassung_de")),
+        _as_text(inserat.get("gefiltert_grund")),
         provider_name,
         inserat.get("llm_score", 0),
-        inserat.get("llm_begruendung", ""),
+        _as_text(inserat.get("llm_begruendung", "")),
         datetime.now().isoformat()
     ))
     con.commit()
@@ -786,6 +794,12 @@ async def agent_lauf(cfg: dict):
             gesamt_neu += 1
             inserat["gefiltert_grund"] = None
 
+            def _save(inserat=inserat):
+                try:
+                    speichere_inserat(con, inserat, provider_name)
+                except Exception as e:
+                    log.error("DB-Speichern fehlgeschlagen für %s: %s", inserat["id"], e)
+
             log.info("Neu: [%s] %s – %s", region["name"], inserat["id"], inserat.get("titel", ""))
 
             # ── Pre-LLM Filter (Preis + Card-Ort): spart LLM-Kosten ──
@@ -794,7 +808,7 @@ async def agent_lauf(cfg: dict):
                 # bilder kennen wir hier noch nicht — diesen Filter erst nach Detail-Scrape
                 inserat["gefiltert_grund"] = grund
                 log.info("⊘ Pre-LLM gefiltert: %s — %s", inserat["id"], grund)
-                speichere_inserat(con, inserat, provider_name)
+                _save()
                 gesamt_filter += 1
                 continue
 
@@ -813,7 +827,7 @@ async def agent_lauf(cfg: dict):
             if grund:
                 inserat["gefiltert_grund"] = grund
                 log.info("⊘ Pre-LLM gefiltert: %s — %s", inserat["id"], grund)
-                speichere_inserat(con, inserat, provider_name)
+                _save()
                 gesamt_filter += 1
                 continue
 
@@ -836,12 +850,12 @@ async def agent_lauf(cfg: dict):
             if grund:
                 inserat["gefiltert_grund"] = grund
                 log.info("⊘ Post-LLM gefiltert: %s — %s", inserat["id"], grund)
-                speichere_inserat(con, inserat, provider_name)
+                _save()
                 gesamt_filter += 1
                 continue
 
             # ── Bestanden: speichern + ggf. Telegram ──
-            speichere_inserat(con, inserat, provider_name)
+            _save()
             if inserat["llm_score"] >= score_schwelle:
                 gesamt_treffer += 1
                 try:
@@ -970,6 +984,13 @@ async def cmd_rescore():
         # Post-LLM Filter
         grund = _filter_post_llm(inserat, llm_data, hart)
 
+        def _txt(v):
+            if v is None or isinstance(v, (str, int, float)):
+                return v
+            if isinstance(v, list):
+                return " ".join(str(x) for x in v if x is not None)
+            return str(v)
+
         con.execute("""
             UPDATE inserate SET
               llm_score = ?, llm_begruendung = ?, llm_provider = ?,
@@ -982,18 +1003,18 @@ async def cmd_rescore():
             WHERE id = ?
         """, (
             score,
-            llm_data.get("begruendung", ""),
+            _txt(llm_data.get("begruendung", "")),
             provider_name,
             llm_data.get("flaeche_qm"),
-            llm_data.get("typ"),
+            _txt(llm_data.get("typ")),
             None if llm_data.get("ist_zum_kauf") is None else (1 if llm_data["ist_zum_kauf"] else 0),
             None if llm_data.get("ist_makler") is None else (1 if llm_data["ist_makler"] else 0),
-            llm_data.get("meerblick"),
-            llm_data.get("zustand"),
+            _txt(llm_data.get("meerblick")),
+            _txt(llm_data.get("zustand")),
             json.dumps(llm_data.get("rote_flaggen") or [], ensure_ascii=False),
-            llm_data.get("zusammenfassung_de"),
-            llm_data.get("ort_im_inserat"),
-            grund,
+            _txt(llm_data.get("zusammenfassung_de")),
+            _txt(llm_data.get("ort_im_inserat")),
+            _txt(grund),
             inserat["id"],
         ))
         con.commit()

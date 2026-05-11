@@ -147,9 +147,24 @@ def _normalisiere_felder(data: dict) -> dict:
         out["rote_flaggen"] = []
     out["rote_flaggen"] = [str(f) for f in out["rote_flaggen"] if f]
 
-    # ort_im_inserat: leeren String wie None behandeln
-    if isinstance(out["ort_im_inserat"], str) and not out["ort_im_inserat"].strip():
-        out["ort_im_inserat"] = None
+    # String-Felder absichern — LLM gibt manchmal Listen oder Zahlen zurück
+    # ("begruendung": ["Satz 1", "Satz 2"]). SQLite kann Listen nicht binden.
+    for feld in ("begruendung", "zusammenfassung_de"):
+        v = out[feld]
+        if v is None:
+            out[feld] = ""
+        elif isinstance(v, list):
+            out[feld] = " ".join(str(x) for x in v if x)
+        elif not isinstance(v, str):
+            out[feld] = str(v)
+
+    # ort_im_inserat: leeren String wie None behandeln; Liste joinen
+    v = out["ort_im_inserat"]
+    if isinstance(v, list):
+        v = ", ".join(str(x) for x in v if x)
+    if isinstance(v, str) and not v.strip():
+        v = None
+    out["ort_im_inserat"] = v
 
     return out
 
