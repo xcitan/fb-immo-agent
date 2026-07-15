@@ -8,7 +8,7 @@
 provider = "ollama"
 
 [llm.ollama]
-model = "llama3.1:8b"
+model = "llama4"
 host  = "http://localhost:11434"
 # Modellwahl nach RAM:
 #   llama3.1:8b   →  8 GB  (empfohlen für die meisten Server)
@@ -61,7 +61,10 @@ name  = "San Fernando, Cebu"
 aktiv = true   # deaktiviert ohne löschen
 url   = "https://www.facebook.com/marketplace/112796322073251/search?minPrice=100&maxPrice=8000000&query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
 
-
+[[suche]]
+name  = "Carcar, Cebu"
+aktiv = true   # deaktiviert ohne löschen
+url   = "https://www.facebook.com/marketplace/106012909439033/search?sortBy=creation_time_descend&query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
 
 # ── Bewertungskriterien ───────────────────────
 [kriterien]
@@ -72,7 +75,7 @@ url   = "https://www.facebook.com/marketplace/112796322073251/search?minPrice=10
 min_bilder      = 2          # Mindestanzahl Fotos auf der Detailseite
 min_flaeche_qm  = 200        # Mindestgröße Grundstück; null-Werte werden durchgelassen
 max_preis_php   = 8000000    # 8 Mio PHP ≈ 80k EUR
-min_preis_php   = 10000      # alles darunter ist Spam/Clickbait
+min_preis_php   = 1000      # alles darunter ist Spam/Clickbait
 typen_blacklist = ["condo", "apartment", "sonstiges"]   # diese vom LLM erkannten Typen werden verworfen ("unklar" bleibt drin)
 
 # Pre-LLM Titel-Blocklist: Inserate deren Titel eines dieser Substrings (case-insensitive)
