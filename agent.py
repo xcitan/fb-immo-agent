@@ -32,8 +32,8 @@ log = logging.getLogger(__name__)
 
 # ─── Konstanten ───────────────────────────────────────────────────────────────
 
-SESSION_FILE = "cookies.json"   # Facebook-Cookies (exportiert vom lokalen Browser)
-DB_FILE      = "inserate.db"
+PROFILE_DIR = "fb_profile"  # Playwright persistent browser profile (Cookies + localStorage)
+DB_FILE     = "inserate.db"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -41,50 +41,33 @@ USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# sameSite-Mapping: Chrome-Extension-Format → Playwright-Format
+
+# ─── Browser-Profil-Hilfsfunktionen ──────────────────────────────────────────
+
+COOKIES_FILE = "cookies.json"  # Browser-Export für --import-cookies
+
 SAMESITE_MAP = {
-    "no_restriction": "None",
-    "unspecified":    "None",
-    "lax":            "Lax",
-    "strict":         "Strict",
-    "none":           "None",
-    "Lax":            "Lax",
-    "Strict":         "Strict",
-    "None":           "None",
+    "no_restriction": "None", "unspecified": "None",
+    "lax": "Lax", "strict": "Strict", "none": "None",
+    "Lax": "Lax", "Strict": "Strict", "None": "None",
 }
 
 
-# ─── Cookie-Hilfsfunktionen ───────────────────────────────────────────────────
-
-def lade_cookies() -> list[dict]:
-    """Lädt Cookies aus cookies.json (unterstützt Chrome-Extension-Formate)."""
-    with open(SESSION_FILE) as f:
+def _lade_cookies() -> list[dict]:
+    with open(COOKIES_FILE) as f:
         data = json.load(f)
     if isinstance(data, list):
         return data
     if isinstance(data, dict) and "cookies" in data:
         return data["cookies"]
-    raise ValueError("Unbekanntes cookies.json Format — erwartet Liste oder {cookies: [...]}")
+    raise ValueError("Unbekanntes cookies.json Format")
 
 
-def speichere_cookies(cookies: list[dict]):
-    """Schreibt aktualisierte Cookies (Playwright-Format) zurück in cookies.json."""
-    with open(SESSION_FILE, "w") as f:
-        json.dump(cookies, f, indent=2)
-
-
-def cookies_playwright_format(cookies: list[dict]) -> list[dict]:
-    """
-    Normalisiert Cookies auf das Playwright-Format.
-    - Mappt Chrome-Extension sameSite-Werte (no_restriction, unspecified, ...)
-    - Konvertiert expirationDate → expires
-    - Entfernt unbekannte Felder
-    """
-    erlaubte_felder = {"name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
+def _cookies_playwright_format(cookies: list[dict]) -> list[dict]:
+    erlaubte = {"name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
     result = []
     for c in cookies:
-        clean = {k: v for k, v in c.items() if k in erlaubte_felder}
-        # expirationDate (Chrome-Extension) → expires (Playwright)
+        clean = {k: v for k, v in c.items() if k in erlaubte}
         if "expires" not in clean and "expirationDate" in c:
             clean["expires"] = int(c["expirationDate"])
         if "sameSite" in clean:
@@ -92,6 +75,40 @@ def cookies_playwright_format(cookies: list[dict]) -> list[dict]:
         if clean.get("name") and clean.get("value") is not None:
             result.append(clean)
     return result
+
+
+async def _launch_persistent_ctx(p, headless: bool, locale: str = "de-DE"):
+    """Startet einen Playwright Persistent Context mit dem lokalen Browser-Profil."""
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    return await p.chromium.launch_persistent_context(
+        PROFILE_DIR,
+        headless=headless,
+        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        user_agent=USER_AGENT,
+        viewport={"width": 1280, "height": 900},
+        locale=locale,
+    )
+
+
+async def _sende_auth_alert():
+    """Sendet Telegram-Alarm wenn die Facebook-Session abgelaufen ist."""
+    try:
+        token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+        bot = telegram.Bot(token=token)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⚠ *FB\\-Immo\\-Agent: Session abgelaufen*\n\n"
+                "Neue Cookies exportieren und auf dem Server ausführen:\n"
+                "`python agent\\.py \\-\\-import\\-cookies`"
+            ),
+            parse_mode="MarkdownV2",
+        )
+    except Exception as e:
+        log.warning("Auth-Alert nicht gesendet: %s", e)
 
 
 # ─── Parsing-Helfer (Preis, Ort, Bilder) ──────────────────────────────────────
@@ -485,74 +502,78 @@ async def ist_eingeloggt(page) -> tuple[bool, str]:
     return True, ""
 
 
-# ─── Cookie-Check (--login) ───────────────────────────────────────────────────
+# ─── Session-Check (--login) ─────────────────────────────────────────────────
 
 async def facebook_login_einmalig():
+    """--login: Prüft headless ob die Facebook-Session noch aktiv ist."""
+    print("\nPrüfe Facebook-Session...")
+    async with Stealth().use_async(async_playwright()) as p:
+        ctx = await _launch_persistent_ctx(p, headless=True)
+        page = await ctx.new_page()
+        await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=20000)
+        await asyncio.sleep(3)
+        eingeloggt, grund = await ist_eingeloggt(page)
+        titel = await page.title()
+        await ctx.close()
+
+    if eingeloggt:
+        log.info("✓ Session aktiv")
+        print(f"\n✓ Session aktiv. Titel: {titel}")
+    else:
+        log.warning("✗ Session abgelaufen: %s", grund)
+        print(f"\n✗ Session abgelaufen: {grund}")
+        print("\nBitte cookies.json exportieren (Cookie-Editor Extension) und ausführen:")
+        print("  python3 agent.py --import-cookies")
+
+
+# ─── Cookie-Import (--import-cookies) ────────────────────────────────────────
+
+async def cmd_import_cookies():
     """
-    Prüft ob die cookies.json gültig ist und Facebook-Login funktioniert.
-    Kein Browser wird geöffnet — die Cookies müssen manuell exportiert werden.
+    --import-cookies: Liest cookies.json (Browser-Export) und importiert sie ins
+    Browser-Profil. Facebook setzt dabei httpOnly-Session-Cookies, die im Profil
+    persistiert werden. Danach läuft der Agent ohne weitere Cookie-Exporte.
     """
-    if not os.path.exists(SESSION_FILE):
-        print(f"\nFehler: {SESSION_FILE} nicht gefunden.")
-        print("Bitte cookies.json aus dem Browser exportieren und nach")
-        print(f"/opt/fb_immo_agent/{SESSION_FILE} kopieren.")
-        print("\nEmpfohlene Browser-Extension: 'Cookie-Editor' (Chrome/Firefox)")
+    if not os.path.exists(COOKIES_FILE):
+        print(f"\nFehler: {COOKIES_FILE} nicht gefunden.")
+        print("Bitte cookies.json aus dem Browser exportieren (Cookie-Editor Extension)")
+        print(f"und nach {os.path.abspath(COOKIES_FILE)} kopieren.")
         return
 
-    print(f"\nPrüfe Cookies aus {SESSION_FILE}...")
-    cookies = cookies_playwright_format(lade_cookies())
-    print(f"{len(cookies)} Cookies geladen.")
+    cookies = _cookies_playwright_format(_lade_cookies())
+    print(f"\n{len(cookies)} Cookies aus {COOKIES_FILE} geladen.")
+    print("Importiere ins Browser-Profil...")
 
     async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = await browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900}
-        )
+        ctx = await _launch_persistent_ctx(p, headless=True)
         await ctx.add_cookies(cookies)
         page = await ctx.new_page()
         await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(3)
         eingeloggt, grund = await ist_eingeloggt(page)
         titel = await page.title()
-        url   = page.url
-        await browser.close()
+        await ctx.close()
 
     if eingeloggt:
-        log.info("✓ Cookies funktionieren — eingeloggt")
-        print(f"\n✓ Login erfolgreich! Seitentitel: {titel}")
+        log.info("✓ Cookie-Import erfolgreich — Session aktiv in '%s/'", PROFILE_DIR)
+        print(f"\n✓ Import erfolgreich — Session aktiv. Titel: {titel}")
+        print(f"  Profil gespeichert in '{PROFILE_DIR}/' (bleibt Wochen aktiv).")
     else:
-        log.warning("✗ Cookies ungültig oder abgelaufen: %s", grund)
-        print(f"\n✗ Login fehlgeschlagen: {grund}")
-        print(f"  URL: {url}")
-        print("Bitte neue Cookies exportieren und cookies.json ersetzen.")
+        log.warning("✗ Cookie-Import: nicht eingeloggt nach Import (%s)", grund)
+        print(f"\n✗ Import fehlgeschlagen: {grund}")
+        print("Bitte neue Cookies exportieren und nochmal versuchen.")
 
 
 # ─── Scraper ──────────────────────────────────────────────────────────────────
 
 async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
     """Scrapt alle Inserate einer Suchregion."""
-
-    if not os.path.exists(SESSION_FILE):
-        log.error("Keine %s gefunden!", SESSION_FILE)
-        return []
-
     timeout  = scraper_cfg.get("timeout_sekunden", 30) * 1000
     scroll_n = scraper_cfg.get("scroll_schritte", 4)
-    cookies  = cookies_playwright_format(lade_cookies())
     inserate = []
 
     async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
-        )
-        ctx = await browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900},
-            locale="de-DE"
-        )
-        await ctx.add_cookies(cookies)
+        ctx = await _launch_persistent_ctx(p, headless=True)
         page = await ctx.new_page()
 
         await page.add_init_script(
@@ -568,10 +589,9 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
         if not eingeloggt:
             log.error("⚠ NICHT EINGELOGGT bei Facebook (%s)", grund)
             log.error("⚠ URL nach Navigation: %s", page.url)
-            log.error("⚠ Cookies sind ungültig oder abgelaufen — bitte cookies.json neu exportieren.")
-            log.error("⚠ Prüfen mit: python agent.py --login")
-            # WICHTIG: keine Cookies zurückschreiben — sonst überschreiben wir gute Cookies mit Logout-State.
-            await browser.close()
+            log.error("⚠ Session abgelaufen — bitte: python agent.py --login")
+            await _sende_auth_alert()
+            await ctx.close()
             return []
 
         # Runterscrollen um mehr Inserate zu laden
@@ -587,7 +607,7 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
             eingeloggt, grund = await ist_eingeloggt(page)
             if not eingeloggt:
                 log.error("⚠ 0 Treffer — Session während des Scrolls verloren (%s)", grund)
-                await browser.close()
+                await ctx.close()
                 return []
             log.warning("0 Listings, aber noch eingeloggt — Region evtl. leer oder Selektor veraltet.")
 
@@ -633,14 +653,7 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
             except Exception as e:
                 log.warning("Fehler beim Parsen eines Inserats: %s", e)
 
-        # Nur speichern wenn wir noch eingeloggt sind — sonst überschreiben wir
-        # die guten Cookies mit Session-Cookies aus einem Logout-Redirect.
-        eingeloggt, grund = await ist_eingeloggt(page)
-        if eingeloggt:
-            speichere_cookies(await ctx.cookies())
-        else:
-            log.warning("Cookies nicht gespeichert — Session am Ende des Scrapes verloren (%s)", grund)
-        await browser.close()
+        await ctx.close()
 
     log.info("%d eindeutige Inserate aus '%s'", len(inserate), region["name"])
     return inserate
@@ -653,12 +666,9 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> tuple[str, int]:
     """
     timeout = scraper_cfg.get("detail_timeout", 20) * 1000
     max_len = scraper_cfg.get("max_beschreibung", 2000)
-    cookies = cookies_playwright_format(lade_cookies())
 
     async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = await browser.new_context(user_agent=USER_AGENT)
-        await ctx.add_cookies(cookies)
+        ctx = await _launch_persistent_ctx(p, headless=True)
         page = await ctx.new_page()
         url = f"https://www.facebook.com/marketplace/item/{inserat_id}/"
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
@@ -667,7 +677,7 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> tuple[str, int]:
         eingeloggt, grund = await ist_eingeloggt(page)
         if not eingeloggt:
             log.error("⚠ Detail-Scrape: nicht eingeloggt (%s)", grund)
-            await browser.close()
+            await ctx.close()
             return "", 0
 
         # Versuche "Mehr anzeigen" zu klicken — FB klappt lange Beschreibungen ein.
@@ -687,11 +697,7 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> tuple[str, int]:
 
         bilder_anzahl = await zaehle_bilder_auf_seite(page)
 
-        # Nur speichern wenn noch eingeloggt — gleiche Logik wie in scrape_region.
-        eingeloggt, _ = await ist_eingeloggt(page)
-        if eingeloggt:
-            speichere_cookies(await ctx.cookies())
-        await browser.close()
+        await ctx.close()
         return beschreibung[:max_len], bilder_anzahl
 
 
@@ -1081,11 +1087,21 @@ HILFE = """
 Facebook Marketplace Immobilien-Agent
 
 Verwendung:
-  python agent.py             — Einzelner Scraping-Lauf
-  python agent.py --login     — Cookies prüfen
-  python agent.py --reset     — Datenbank leeren (neu scrapen beim nächsten Lauf)
-  python agent.py --rescore   — Alle DB-Inserate mit aktuellen Kriterien neu bewerten
-  python agent.py --help      — Diese Hilfe
+  python3 agent.py                  — Einzelner Scraping-Lauf
+  python3 agent.py --login          — Session headless prüfen
+  python3 agent.py --import-cookies — cookies.json ins Browser-Profil importieren
+                                      (nach jedem erneuten Cookie-Export ausführen)
+  python3 agent.py --reset          — Datenbank leeren (neu scrapen beim nächsten Lauf)
+  python3 agent.py --rescore        — Alle DB-Inserate mit aktuellen Kriterien neu bewerten
+  python3 agent.py --help           — Diese Hilfe
+
+Session-Workflow (headless Server):
+  1. Cookies im Browser exportieren (Cookie-Editor Extension → Alle kopieren)
+  2. cookies.json auf den Server kopieren
+  3. python3 agent.py --import-cookies
+  4. Session hält Wochen/Monate — bei Ablauf Schritte 1-3 wiederholen.
+
+Browser-Profil: fb_profile/
 """
 
 if __name__ == "__main__":
@@ -1095,6 +1111,8 @@ if __name__ == "__main__":
         print(HILFE)
     elif "--login" in sys.argv:
         asyncio.run(facebook_login_einmalig())
+    elif "--import-cookies" in sys.argv:
+        asyncio.run(cmd_import_cookies())
     elif "--reset" in sys.argv:
         cmd_reset()
     elif "--rescore" in sys.argv:
