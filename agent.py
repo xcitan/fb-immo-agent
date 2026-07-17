@@ -134,22 +134,55 @@ async def _auto_relogin(page) -> bool:
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
         # Cookie-Consent-Banner wegklicken (EU-DSGVO)
-        for label in (
-            "Alle Cookies erlauben", "Allow all cookies",
-            "Zustimmen und weiter", "Accept all",
-            "Optionale Cookies ablehnen", "Decline optional cookies",
+        # Versuche zuerst bekannte data-testid / aria-label Selektoren
+        consent_clicked = False
+        for sel in (
+            '[data-cookiebanner="accept_button"]',
+            '[data-testid="cookie-policy-manage-dialog-accept-button"]',
+            'button[title="Alle Cookies erlauben"]',
+            'button[title="Allow all cookies"]',
         ):
             try:
-                btn = page.get_by_role("button", name=label, exact=False)
-                if await btn.count() > 0:
-                    await btn.first.click()
-                    log.info("Auto-Login: Cookie-Banner geklickt (%s)", label)
+                el = page.locator(sel)
+                if await el.count() > 0:
+                    await el.first.click()
+                    log.info("Auto-Login: Cookie-Banner geklickt (sel: %s)", sel)
                     await asyncio.sleep(1.5)
+                    consent_clicked = True
                     break
             except Exception:
                 pass
 
-        await page.wait_for_selector('input[name="email"]', timeout=15000)
+        if not consent_clicked:
+            # Fallback: Beliebigen Button mit passenden Schlüsselwörtern finden
+            import re as _re
+            _consent_re = _re.compile(
+                r"(erlauben|allow|accept|zustimm|decline|ablehnen)", _re.I
+            )
+            try:
+                for btn in await page.locator("button").all():
+                    txt = (await btn.inner_text()).strip()
+                    if _consent_re.search(txt):
+                        await btn.click()
+                        log.info("Auto-Login: Cookie-Banner geklickt (text: %s)", txt)
+                        await asyncio.sleep(1.5)
+                        consent_clicked = True
+                        break
+            except Exception:
+                pass
+
+        # Email-Feld warten — bei Timeout Screenshot für Diagnose speichern
+        try:
+            await page.wait_for_selector('input[name="email"]', timeout=15000)
+        except Exception:
+            screenshot_path = "/tmp/fb_login_debug.png"
+            try:
+                await page.screenshot(path=screenshot_path, full_page=True)
+                log.error("Auto-Login: Email-Feld nicht gefunden — Screenshot: %s", screenshot_path)
+            except Exception:
+                log.error("Auto-Login: Email-Feld nicht gefunden (Screenshot fehlgeschlagen)")
+            raise
+
         await page.fill('input[name="email"]', email)
         await asyncio.sleep(random.uniform(0.4, 1.0))
         await page.fill('input[name="pass"]', password)
