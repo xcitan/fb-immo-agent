@@ -678,7 +678,9 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict] | None:
 
         # Login-Status prüfen, bevor wir 0 Treffer als "keine Inserate" interpretieren
         eingeloggt, grund = await ist_eingeloggt(page)
-        if not eingeloggt:
+        if eingeloggt:
+            log.info("✓ Auth OK für Region '%s'", region["name"])
+        else:
             log.warning("⚠ Session abgelaufen (%s) — versuche Auto-Login...", grund)
             eingeloggt = await _auto_relogin(page)
             if not eingeloggt:
