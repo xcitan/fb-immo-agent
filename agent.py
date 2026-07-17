@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 from datetime import datetime
@@ -109,6 +110,48 @@ async def _sende_auth_alert():
         )
     except Exception as e:
         log.warning("Auth-Alert nicht gesendet: %s", e)
+
+
+# ─── Auto-Login ───────────────────────────────────────────────────────────────
+
+async def _auto_relogin(page) -> bool:
+    """
+    Meldet sich automatisch mit FACEBOOK_EMAIL + FACEBOOK_PASSWORD an.
+    Gibt True zurück wenn erfolgreich. Schlägt fehl wenn Credentials fehlen,
+    das Passwort falsch ist oder Facebook einen Checkpoint/2FA verlangt.
+    """
+    email    = os.environ.get("FACEBOOK_EMAIL", "")
+    password = os.environ.get("FACEBOOK_PASSWORD", "")
+    if not email or not password:
+        log.warning("Auto-Login: FACEBOOK_EMAIL/FACEBOOK_PASSWORD nicht gesetzt — übersprungen.")
+        return False
+
+    log.info("Auto-Login: Versuche automatische Anmeldung als %s...", email)
+    try:
+        await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=20000)
+        await asyncio.sleep(random.uniform(1.5, 2.5))
+
+        await page.fill('input[name="email"]', email)
+        await asyncio.sleep(random.uniform(0.4, 1.0))
+        await page.fill('input[name="pass"]', password)
+        await asyncio.sleep(random.uniform(0.6, 1.4))
+        await page.click('button[name="login"]')
+        await asyncio.sleep(6)
+
+        url = page.url or ""
+        if any(x in url for x in ("/checkpoint", "/two_step", "two_factor", "login/two-step")):
+            log.error("Auto-Login: Checkpoint/2FA erkannt — manueller Eingriff erforderlich. URL: %s", url)
+            return False
+
+        eingeloggt, grund = await ist_eingeloggt(page)
+        if eingeloggt:
+            log.info("✓ Auto-Login erfolgreich.")
+            return True
+        log.warning("✗ Auto-Login fehlgeschlagen: %s", grund)
+        return False
+    except Exception as e:
+        log.error("Auto-Login Fehler: %s", e)
+        return False
 
 
 # ─── Parsing-Helfer (Preis, Ort, Bilder) ──────────────────────────────────────
@@ -634,12 +677,16 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
         # Login-Status prüfen, bevor wir 0 Treffer als "keine Inserate" interpretieren
         eingeloggt, grund = await ist_eingeloggt(page)
         if not eingeloggt:
-            log.error("⚠ NICHT EINGELOGGT bei Facebook (%s)", grund)
-            log.error("⚠ URL nach Navigation: %s", page.url)
-            log.error("⚠ Session abgelaufen — bitte: python agent.py --login")
-            await _sende_auth_alert()
-            await ctx.close()
-            return []
+            log.warning("⚠ Session abgelaufen (%s) — versuche Auto-Login...", grund)
+            eingeloggt = await _auto_relogin(page)
+            if not eingeloggt:
+                log.error("⚠ Auto-Login fehlgeschlagen — manueller Eingriff erforderlich.")
+                await _sende_auth_alert()
+                await ctx.close()
+                return []
+            log.info("Auto-Login erfolgreich — lade Region '%s' neu...", region["name"])
+            await page.goto(region["url"], wait_until="domcontentloaded", timeout=timeout)
+            await asyncio.sleep(5)
 
         # Runterscrollen um mehr Inserate zu laden
         for _ in range(scroll_n):
@@ -653,10 +700,22 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
             # Doppel-Check: vielleicht ist FB zwischen goto und scroll auf Login gerutscht.
             eingeloggt, grund = await ist_eingeloggt(page)
             if not eingeloggt:
-                log.error("⚠ 0 Treffer — Session während des Scrolls verloren (%s)", grund)
-                await ctx.close()
-                return []
-            log.warning("0 Listings, aber noch eingeloggt — Region evtl. leer oder Selektor veraltet.")
+                log.warning("⚠ 0 Treffer — Session während des Scrolls verloren (%s)", grund)
+                eingeloggt = await _auto_relogin(page)
+                if not eingeloggt:
+                    await ctx.close()
+                    return []
+                # Nach Login nochmal scrollen und Listings laden
+                await page.goto(region["url"], wait_until="domcontentloaded", timeout=timeout)
+                await asyncio.sleep(5)
+                for _ in range(scroll_n):
+                    await page.keyboard.press("End")
+                    await asyncio.sleep(1.5)
+                listings = await page.query_selector_all('a[href*="/marketplace/item/"]')
+                if not listings:
+                    log.warning("0 Listings nach Auto-Login — Region evtl. leer oder Selektor veraltet.")
+            else:
+                log.warning("0 Listings, aber noch eingeloggt — Region evtl. leer oder Selektor veraltet.")
 
         seen_ids = set()
 
@@ -723,9 +782,14 @@ async def scrape_detail(inserat_id: str, scraper_cfg: dict) -> tuple[str, int]:
 
         eingeloggt, grund = await ist_eingeloggt(page)
         if not eingeloggt:
-            log.error("⚠ Detail-Scrape: nicht eingeloggt (%s)", grund)
-            await ctx.close()
-            return "", 0
+            log.warning("⚠ Detail-Scrape: Session abgelaufen (%s) — versuche Auto-Login...", grund)
+            eingeloggt = await _auto_relogin(page)
+            if not eingeloggt:
+                log.error("⚠ Detail-Scrape: Auto-Login fehlgeschlagen.")
+                await ctx.close()
+                return "", 0
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            await asyncio.sleep(3)
 
         # Versuche "Mehr anzeigen" zu klicken — FB klappt lange Beschreibungen ein.
         try:
@@ -1144,14 +1208,17 @@ Verwendung:
   python3 agent.py --rescore           — Alle DB-Inserate mit aktuellen Kriterien neu bewerten
   python3 agent.py --help              — Diese Hilfe
 
-Session-Workflow (empfohlen):
+Auto-Login (empfohlen):
+  FACEBOOK_EMAIL und FACEBOOK_PASSWORD in .env setzen.
+  Der Agent meldet sich bei abgelaufener Session automatisch neu an.
+  Schlägt fehl bei CAPTCHA oder 2FA — dann kommt ein Telegram-Alarm.
+
+Session-Workflow (manuell, bei 2FA oder CAPTCHA):
   1. Lokal (oder ssh -X user@server) ausführen:
        python3 agent.py --login-interactive
   2. Im Browser-Fenster bei Facebook einloggen (inkl. 2FA)
-  3. Falls auf dem Server eingeloggt: fertig — Profil liegt bereits an Ort und Stelle.
-     Falls lokal: Profil auf Server kopieren:
+  3. Falls lokal: Profil auf Server kopieren:
        rsync -av fb_profile/ immo@server:/opt/fb_immo_agent/fb_profile/
-  4. Session hält Wochen/Monate — bei Ablauf Schritte 1-3 wiederholen.
 
 Browser-Profil: fb_profile/
 """
