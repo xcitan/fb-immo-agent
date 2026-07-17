@@ -21,11 +21,12 @@ from llm_providers import get_llm_provider
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("agent.log"),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 
 PROFILE_DIR = "fb_profile"  # Playwright persistent browser profile (Cookies + localStorage)
 DB_FILE     = "inserate.db"
+LOG_FILE    = "/var/log/fb-immo-agent/agent.log"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
