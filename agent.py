@@ -133,6 +133,23 @@ async def _auto_relogin(page) -> bool:
         await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
+        # Cookie-Consent-Banner wegklicken (EU-DSGVO)
+        for label in (
+            "Alle Cookies erlauben", "Allow all cookies",
+            "Zustimmen und weiter", "Accept all",
+            "Optionale Cookies ablehnen", "Decline optional cookies",
+        ):
+            try:
+                btn = page.get_by_role("button", name=label, exact=False)
+                if await btn.count() > 0:
+                    await btn.first.click()
+                    log.info("Auto-Login: Cookie-Banner geklickt (%s)", label)
+                    await asyncio.sleep(1.5)
+                    break
+            except Exception:
+                pass
+
+        await page.wait_for_selector('input[name="email"]', timeout=15000)
         await page.fill('input[name="email"]', email)
         await asyncio.sleep(random.uniform(0.4, 1.0))
         await page.fill('input[name="pass"]', password)
