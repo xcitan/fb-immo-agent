@@ -19,6 +19,12 @@ import telegram
 from config_loader import lade_config
 from llm_providers import get_llm_provider
 
+# ─── Konstanten ───────────────────────────────────────────────────────────────
+
+PROFILE_DIR = "fb_profile"  # Playwright persistent browser profile (Cookies + localStorage)
+DB_FILE     = "inserate.db"
+LOG_FILE    = "/var/log/fb-immo-agent/agent.log"
+
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -31,12 +37,6 @@ logging.basicConfig(
     ]
 )
 log = logging.getLogger(__name__)
-
-# ─── Konstanten ───────────────────────────────────────────────────────────────
-
-PROFILE_DIR = "fb_profile"  # Playwright persistent browser profile (Cookies + localStorage)
-DB_FILE     = "inserate.db"
-LOG_FILE    = "/var/log/fb-immo-agent/agent.log"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
