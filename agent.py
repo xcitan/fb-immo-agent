@@ -656,7 +656,7 @@ async def cmd_import_cookies():
 
 # ─── Scraper ──────────────────────────────────────────────────────────────────
 
-async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
+async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict] | None:
     """Scrapt alle Inserate einer Suchregion."""
     timeout  = scraper_cfg.get("timeout_sekunden", 30) * 1000
     scroll_n = scraper_cfg.get("scroll_schritte", 4)
@@ -681,9 +681,8 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
             eingeloggt = await _auto_relogin(page)
             if not eingeloggt:
                 log.error("⚠ Auto-Login fehlgeschlagen — manueller Eingriff erforderlich.")
-                await _sende_auth_alert()
                 await ctx.close()
-                return []
+                return None
             log.info("Auto-Login erfolgreich — lade Region '%s' neu...", region["name"])
             await page.goto(region["url"], wait_until="domcontentloaded", timeout=timeout)
             await asyncio.sleep(5)
@@ -704,7 +703,7 @@ async def scrape_region(region: dict, scraper_cfg: dict) -> list[dict]:
                 eingeloggt = await _auto_relogin(page)
                 if not eingeloggt:
                     await ctx.close()
-                    return []
+                    return None
                 # Nach Login nochmal scrollen und Listings laden
                 await page.goto(region["url"], wait_until="domcontentloaded", timeout=timeout)
                 await asyncio.sleep(5)
@@ -943,6 +942,11 @@ async def agent_lauf(cfg: dict):
 
     for region in regionen:
         inserate = await scrape_region(region, scraper_cfg)
+
+        if inserate is None:
+            # Auth-Fehler: einmal alarmieren und restliche Regionen überspringen
+            await _sende_auth_alert()
+            break
 
         for inserat in inserate:
             if not ist_neu(con, inserat["id"]):
