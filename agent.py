@@ -522,8 +522,55 @@ async def facebook_login_einmalig():
     else:
         log.warning("✗ Session abgelaufen: %s", grund)
         print(f"\n✗ Session abgelaufen: {grund}")
-        print("\nBitte cookies.json exportieren (Cookie-Editor Extension) und ausführen:")
-        print("  python3 agent.py --import-cookies")
+        print("\nNeu anmelden mit sichtbarem Browser:")
+        print("  python3 agent.py --login-interactive")
+
+
+# ─── Interaktiver Login (--login-interactive) ─────────────────────────────────
+
+async def cmd_login_interactive():
+    """
+    --login-interactive: Öffnet einen sichtbaren Browser für manuelle Anmeldung.
+
+    Funktioniert nur wenn ein Display verfügbar ist:
+      • Lokal (Linux/Mac/Windows): direkt ausführen
+      • SSH auf Server: mit X11-Forwarding verbinden:  ssh -X user@server
+        dann:  python3 agent.py --login-interactive
+
+    Danach das Profil auf den Server kopieren (falls woanders eingeloggt):
+      rsync -av fb_profile/ immo@server:/opt/fb_immo_agent/fb_profile/
+    """
+    print("\nÖffne Browser für manuelle Anmeldung...")
+    print("Bitte bei Facebook einloggen (inkl. 2FA falls nötig).")
+    print("Das Fenster schließt automatisch nach erkanntem Login.\n")
+
+    async with async_playwright() as p:
+        ctx = await _launch_persistent_ctx(p, headless=False)
+        page = await ctx.new_page()
+        await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=30000)
+
+        max_wartezeit = 180  # Sekunden
+        for i in range(max_wartezeit // 2):
+            await asyncio.sleep(2)
+            try:
+                eingeloggt, _ = await ist_eingeloggt(page)
+            except Exception:
+                continue
+            if eingeloggt:
+                print("✓ Login erkannt — Session wird gespeichert...")
+                # Kurz auf der Startseite bleiben damit alle Session-Cookies gesetzt werden
+                await page.goto("https://www.facebook.com", wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(4)
+                await ctx.close()
+                log.info("✓ Interaktiver Login erfolgreich — Profil gespeichert in '%s/'", PROFILE_DIR)
+                print(f"\n✓ Erfolgreich — Session gespeichert in '{PROFILE_DIR}/'")
+                print("  Der Agent nutzt dieses Profil dauerhaft (hält Wochen bis Monate).")
+                return
+            if i % 15 == 0 and i > 0:
+                print(f"  Warte auf Login ... ({i * 2}/{max_wartezeit}s)")
+
+        await ctx.close()
+        print("\n✗ Timeout — kein Login erkannt. Bitte erneut versuchen.")
 
 
 # ─── Cookie-Import (--import-cookies) ────────────────────────────────────────
@@ -1087,18 +1134,23 @@ HILFE = """
 Facebook Marketplace Immobilien-Agent
 
 Verwendung:
-  python3 agent.py                  — Einzelner Scraping-Lauf
-  python3 agent.py --login          — Session headless prüfen
-  python3 agent.py --import-cookies — cookies.json ins Browser-Profil importieren
-                                      (nach jedem erneuten Cookie-Export ausführen)
-  python3 agent.py --reset          — Datenbank leeren (neu scrapen beim nächsten Lauf)
-  python3 agent.py --rescore        — Alle DB-Inserate mit aktuellen Kriterien neu bewerten
-  python3 agent.py --help           — Diese Hilfe
+  python3 agent.py                     — Einzelner Scraping-Lauf
+  python3 agent.py --login             — Session headless prüfen
+  python3 agent.py --login-interactive — Sichtbaren Browser öffnen und manuell einloggen
+                                         (empfohlen — zuverlässiger als Cookie-Import)
+  python3 agent.py --import-cookies    — cookies.json ins Browser-Profil importieren
+                                         (Fallback wenn kein Display verfügbar)
+  python3 agent.py --reset             — Datenbank leeren (neu scrapen beim nächsten Lauf)
+  python3 agent.py --rescore           — Alle DB-Inserate mit aktuellen Kriterien neu bewerten
+  python3 agent.py --help              — Diese Hilfe
 
-Session-Workflow (headless Server):
-  1. Cookies im Browser exportieren (Cookie-Editor Extension → Alle kopieren)
-  2. cookies.json auf den Server kopieren
-  3. python3 agent.py --import-cookies
+Session-Workflow (empfohlen):
+  1. Lokal (oder ssh -X user@server) ausführen:
+       python3 agent.py --login-interactive
+  2. Im Browser-Fenster bei Facebook einloggen (inkl. 2FA)
+  3. Falls auf dem Server eingeloggt: fertig — Profil liegt bereits an Ort und Stelle.
+     Falls lokal: Profil auf Server kopieren:
+       rsync -av fb_profile/ immo@server:/opt/fb_immo_agent/fb_profile/
   4. Session hält Wochen/Monate — bei Ablauf Schritte 1-3 wiederholen.
 
 Browser-Profil: fb_profile/
@@ -1109,6 +1161,8 @@ if __name__ == "__main__":
 
     if "--help" in sys.argv or "-h" in sys.argv:
         print(HILFE)
+    elif "--login-interactive" in sys.argv:
+        asyncio.run(cmd_login_interactive())
     elif "--login" in sys.argv:
         asyncio.run(facebook_login_einmalig())
     elif "--import-cookies" in sys.argv:
