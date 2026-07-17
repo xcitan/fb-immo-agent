@@ -133,62 +133,46 @@ async def _auto_relogin(page) -> bool:
         await page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
-        # Cookie-Consent-Banner wegklicken (EU-DSGVO)
-        # Versuche zuerst bekannte data-testid / aria-label Selektoren
-        consent_clicked = False
-        for sel in (
-            '[data-cookiebanner="accept_button"]',
-            '[data-testid="cookie-policy-manage-dialog-accept-button"]',
-            'button[title="Alle Cookies erlauben"]',
-            'button[title="Allow all cookies"]',
-        ):
+        # ── Account-Picker ("Weiter"-Button): FB kennt den Account noch ──────
+        weiter = page.get_by_role("button", name="Weiter")
+        if await weiter.count() > 0:
+            log.info("Auto-Login: Account-Picker erkannt — klicke 'Weiter'...")
+            await weiter.first.click()
+            await asyncio.sleep(4)
+            # Direkt eingeloggt? Dann fertig.
+            eingeloggt_check, _ = await ist_eingeloggt(page)
+            if eingeloggt_check:
+                log.info("✓ Auto-Login via Account-Picker erfolgreich.")
+                return True
+            # Sonst: Passwort-Feld ausfüllen
+            pw_field = page.locator('input[name="pass"], input[type="password"]')
+            if await pw_field.count() > 0:
+                log.info("Auto-Login: Passwort-Feld erschienen — fülle aus...")
+                await pw_field.first.fill(password)
+                await asyncio.sleep(random.uniform(0.6, 1.2))
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(6)
+            else:
+                log.warning("Auto-Login: Account-Picker geklickt, aber weder eingeloggt noch Passwortfeld.")
+        else:
+            # ── Standard-Login: Email + Passwort ────────────────────────────
+            # Email-Feld warten — bei Timeout Screenshot für Diagnose speichern
             try:
-                el = page.locator(sel)
-                if await el.count() > 0:
-                    await el.first.click()
-                    log.info("Auto-Login: Cookie-Banner geklickt (sel: %s)", sel)
-                    await asyncio.sleep(1.5)
-                    consent_clicked = True
-                    break
+                await page.wait_for_selector('input[name="email"]', timeout=15000)
             except Exception:
-                pass
+                try:
+                    await page.screenshot(path="/tmp/fb_login_debug.png", full_page=True)
+                    log.error("Auto-Login: Email-Feld nicht gefunden — Screenshot: /tmp/fb_login_debug.png")
+                except Exception:
+                    log.error("Auto-Login: Email-Feld nicht gefunden (Screenshot fehlgeschlagen)")
+                raise
 
-        if not consent_clicked:
-            # Fallback: Beliebigen Button mit passenden Schlüsselwörtern finden
-            import re as _re
-            _consent_re = _re.compile(
-                r"(erlauben|allow|accept|zustimm|decline|ablehnen)", _re.I
-            )
-            try:
-                for btn in await page.locator("button").all():
-                    txt = (await btn.inner_text()).strip()
-                    if _consent_re.search(txt):
-                        await btn.click()
-                        log.info("Auto-Login: Cookie-Banner geklickt (text: %s)", txt)
-                        await asyncio.sleep(1.5)
-                        consent_clicked = True
-                        break
-            except Exception:
-                pass
-
-        # Email-Feld warten — bei Timeout Screenshot für Diagnose speichern
-        try:
-            await page.wait_for_selector('input[name="email"]', timeout=15000)
-        except Exception:
-            screenshot_path = "/tmp/fb_login_debug.png"
-            try:
-                await page.screenshot(path=screenshot_path, full_page=True)
-                log.error("Auto-Login: Email-Feld nicht gefunden — Screenshot: %s", screenshot_path)
-            except Exception:
-                log.error("Auto-Login: Email-Feld nicht gefunden (Screenshot fehlgeschlagen)")
-            raise
-
-        await page.fill('input[name="email"]', email)
-        await asyncio.sleep(random.uniform(0.4, 1.0))
-        await page.fill('input[name="pass"]', password)
-        await asyncio.sleep(random.uniform(0.6, 1.4))
-        await page.click('button[name="login"]')
-        await asyncio.sleep(6)
+            await page.fill('input[name="email"]', email)
+            await asyncio.sleep(random.uniform(0.4, 1.0))
+            await page.fill('input[name="pass"]', password)
+            await asyncio.sleep(random.uniform(0.6, 1.4))
+            await page.click('button[name="login"]')
+            await asyncio.sleep(6)
 
         url = page.url or ""
         if any(x in url for x in ("/checkpoint", "/two_step", "two_factor", "login/two-step")):
