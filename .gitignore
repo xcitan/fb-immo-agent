@@ -1,4 +1,7 @@
 cookies.json
 fb_profile/
 __pycache__/
+inserate.db
+.env
+*.log
 
