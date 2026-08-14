@@ -289,7 +289,17 @@ async def zaehle_bilder_auf_seite(page) -> int:
     Fallback für Listings mit nur einem Foto (kein Thumb-Strip): das
     einzelne <img alt="Produktfoto von …"> zählen.
     """
-    js = r"""
+    # Scroll down then back up to trigger FB's intersection-observer lazy loading
+    # for the thumbnail strip, which may not mount in headless mode otherwise.
+    try:
+        await page.evaluate("window.scrollBy(0, 600)")
+        await asyncio.sleep(1)
+        await page.evaluate("window.scrollBy(0, -600)")
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+    js_count = r"""
         () => {
             const main = document.querySelector('[role="main"]') || document.body;
 
@@ -310,27 +320,32 @@ async def zaehle_bilder_auf_seite(page) -> int:
 
             // 2) Fallback: 1-Foto-Listing ohne Strip — Produktfoto über alt-Prefix.
             const PHOTO_PREFIXES = ['Produktfoto von', 'Product photo of'];
-            const groups = new Map();   // altKey → { minY, urls:Set }
+            const seen = new Set();
             for (const img of main.querySelectorAll('img')) {
                 const alt = img.alt || '';
                 if (!PHOTO_PREFIXES.some(p => alt.startsWith(p))) continue;
-                const key = alt.substring(0, 50);
-                const y = img.getBoundingClientRect().top + window.scrollY;
-                const src = (img.src || '').split('?')[0];
-                let g = groups.get(key);
-                if (!g) { g = { minY: y, urls: new Set() }; groups.set(key, g); }
-                if (y < g.minY) g.minY = y;
-                g.urls.add(src);
+                const src = (img.src || img.getAttribute('data-src') || '').split('?')[0];
+                if (src) seen.add(src);
             }
-            if (groups.size === 0) return 0;
-            let best = null;
-            for (const g of groups.values()) {
-                if (!best || g.minY < best.minY) best = g;
-            }
-            return best.urls.size;
+            return seen.size;
         }
     """
-    return await page.evaluate(js)
+    count = await page.evaluate(js_count)
+
+    # If still 0, wait up to 5 s for at least one thumbnail button to appear,
+    # then re-count. Handles slow headless React hydration.
+    if count == 0:
+        try:
+            await page.wait_for_selector(
+                '[role="main"] [aria-label][role="button"]',
+                timeout=5000,
+            )
+            await asyncio.sleep(0.5)
+            count = await page.evaluate(js_count)
+        except Exception:
+            pass
+
+    return count
 
 
 # Texte die als "label only" verworfen werden — die echte Beschreibung kommt danach.
