@@ -332,12 +332,19 @@ async def zaehle_bilder_auf_seite(page) -> int:
     """
     count = await page.evaluate(js_count)
 
-    # If still 0, wait up to 5 s for at least one thumbnail button to appear,
-    # then re-count. Handles slow headless React hydration.
+    # If still 0, wait up to 5 s for a *thumbnail-specific* button to appear,
+    # then re-count.  The broad [role="button"] selector fires immediately on
+    # any FB page (navigation, message buttons etc.) so we use wait_for_function
+    # with the same prefix check to avoid a false early return.
     if count == 0:
         try:
-            await page.wait_for_selector(
-                '[role="main"] [aria-label][role="button"]',
+            await page.wait_for_function(
+                """() => {
+                    const main = document.querySelector('[role="main"]') || document.body;
+                    const PREFIXES = ['Miniaturbild ', 'Thumbnail '];
+                    return [...main.querySelectorAll('[aria-label][role="button"]')]
+                        .some(el => PREFIXES.some(p => (el.getAttribute('aria-label') || '').startsWith(p)));
+                }""",
                 timeout=5000,
             )
             await asyncio.sleep(0.5)
@@ -1318,7 +1325,7 @@ async def cmd_recheck_bilder():
             }
 
             url = f"https://www.facebook.com/marketplace/item/{inserat['id']}/"
-            log.info("[%d/%d] Lade %s …", i, len(rows), inserat["titel"][:50])
+            log.info("[%d/%d] %s — %s", i, len(rows), inserat["id"], inserat["titel"][:50])
 
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
@@ -1339,7 +1346,7 @@ async def cmd_recheck_bilder():
                 log.warning("Fehler beim Laden von %s: %s", inserat["id"], e)
                 continue
 
-            log.info("  bilder_anzahl: %d → %d", inserat["bilder_anzahl"], neue_bilder)
+            log.info("  bilder_anzahl: %d → %d", inserat["bilder_anzahl"] or 0, neue_bilder)
             inserat["bilder_anzahl"] = neue_bilder
             con.execute(
                 "UPDATE inserate SET bilder_anzahl=? WHERE id=?",
