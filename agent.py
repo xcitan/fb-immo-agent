@@ -1249,6 +1249,182 @@ async def cmd_rescore():
     print(f"\n✓ Neubewertung abgeschlossen: {anz} Inserate, {filter_} gefiltert, {treffer} Treffer.")
 
 
+async def cmd_recheck_bilder():
+    """
+    Öffnet Detailseiten für alle Inserate die als 'zu_wenig_bilder' gefiltert
+    wurden, aktualisiert bilder_anzahl mit der korrigierten Zählung und führt
+    danach die komplette Bewertungs-Pipeline aus (Pre-LLM → LLM → Post-LLM →
+    Telegram).  Ein einziger Browser läuft für alle Inserate durch.
+    """
+    cfg            = lade_config()
+    scraper_cfg    = cfg.get("scraper", {})
+    kriterien_cfg  = cfg.get("kriterien", {})
+    kriterien      = kriterien_cfg.get("text", "")
+    score_schwelle = cfg.get("agent", {}).get("score_schwelle", 7)
+    pause          = cfg.get("agent", {}).get("pause_zwischen_inseraten", 2)
+    provider_name  = cfg.get("llm", {}).get("provider", "ollama")
+    timeout        = scraper_cfg.get("detail_timeout", 20) * 1000
+
+    hart = {
+        "min_bilder":       int(kriterien_cfg.get("min_bilder", 2)),
+        "min_flaeche_qm":   int(kriterien_cfg.get("min_flaeche_qm", 200)),
+        "max_preis_php":    int(kriterien_cfg.get("max_preis_php", 8_000_000)),
+        "min_preis_php":    int(kriterien_cfg.get("min_preis_php", 10_000)),
+        "typen_blacklist":  [t.lower() for t in kriterien_cfg.get("typen_blacklist", ["condo", "apartment"])],
+        "titel_blacklist":  [t.lower() for t in kriterien_cfg.get("titel_blacklist", [])],
+        "erlaubte_orte":    erlaubte_orte_aus_cfg(cfg),
+    }
+
+    con = init_db()
+    rows = con.execute("""
+        SELECT id, region, titel, preis, preis_php, ort_im_inserat,
+               beschreibung, url, bilder_anzahl
+        FROM inserate
+        WHERE gefiltert_grund LIKE 'zu_wenig_bilder%'
+        ORDER BY gefunden_am DESC
+    """).fetchall()
+
+    if not rows:
+        print("Keine 'zu_wenig_bilder'-Inserate in der Datenbank.")
+        con.close()
+        return
+
+    print(f"\n{len(rows)} Inserate mit 'zu_wenig_bilder' gefunden.")
+    antwort = input("Detailseiten erneut aufrufen und neu bewerten? [j/N] ")
+    if antwort.strip().lower() != "j":
+        print("Abgebrochen.")
+        con.close()
+        return
+
+    llm     = get_llm_provider(cfg, kriterien)
+    treffer = 0
+    immer_noch_gefiltert = 0
+
+    async with Stealth().use_async(async_playwright()) as p:
+        ctx  = await _launch_persistent_ctx(p, headless=True)
+        page = await ctx.new_page()
+
+        for i, row in enumerate(rows, 1):
+            inserat = {
+                "id":             row[0],
+                "region":         row[1],
+                "titel":          row[2],
+                "preis":          row[3],
+                "preis_php":      row[4],
+                "ort_im_inserat": row[5],
+                "beschreibung":   row[6],
+                "url":            row[7],
+                "bilder_anzahl":  row[8],
+            }
+
+            url = f"https://www.facebook.com/marketplace/item/{inserat['id']}/"
+            log.info("[%d/%d] Lade %s …", i, len(rows), inserat["titel"][:50])
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                await asyncio.sleep(3)
+
+                eingeloggt, grund = await ist_eingeloggt(page)
+                if not eingeloggt:
+                    log.warning("⚠ Session abgelaufen (%s) — versuche Auto-Login...", grund)
+                    eingeloggt = await _auto_relogin(page)
+                    if not eingeloggt:
+                        log.error("⚠ Auto-Login fehlgeschlagen — überspringe %s.", inserat["id"])
+                        continue
+                    await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                    await asyncio.sleep(3)
+
+                neue_bilder = await zaehle_bilder_auf_seite(page)
+            except Exception as e:
+                log.warning("Fehler beim Laden von %s: %s", inserat["id"], e)
+                continue
+
+            log.info("  bilder_anzahl: %d → %d", inserat["bilder_anzahl"], neue_bilder)
+            inserat["bilder_anzahl"] = neue_bilder
+            con.execute(
+                "UPDATE inserate SET bilder_anzahl=? WHERE id=?",
+                (neue_bilder, inserat["id"]),
+            )
+            con.commit()
+
+            # Pre-LLM Filter neu prüfen
+            grund = _filter_pre_llm(inserat, hart)
+            if grund:
+                con.execute(
+                    "UPDATE inserate SET gefiltert_grund=? WHERE id=?",
+                    (grund, inserat["id"]),
+                )
+                con.commit()
+                log.info("  ⊘ immer noch gefiltert: %s", grund)
+                immer_noch_gefiltert += 1
+                continue
+
+            # Beschreibung aus DB ist vorhanden — LLM bewerten
+            llm_data = llm.bewerte(inserat)
+            inserat.update(llm_data)
+            score = llm_data.get("score", 0)
+            log.info("  Score: %d/10", score)
+
+            grund_post = _filter_post_llm(inserat, llm_data, hart)
+
+            def _txt(v):
+                if v is None or isinstance(v, (str, int, float)):
+                    return v
+                if isinstance(v, list):
+                    return " ".join(str(x) for x in v if x is not None)
+                return str(v)
+
+            con.execute("""
+                UPDATE inserate SET
+                  llm_score = ?, llm_begruendung = ?, llm_provider = ?,
+                  flaeche_qm = ?, typ = ?,
+                  ist_zum_kauf = ?, ist_makler = ?,
+                  meerblick = ?, zustand = ?,
+                  rote_flaggen = ?, zusammenfassung_de = ?,
+                  ort_im_inserat = COALESCE(?, ort_im_inserat),
+                  gefiltert_grund = ?
+                WHERE id = ?
+            """, (
+                score,
+                _txt(llm_data.get("begruendung", "")),
+                provider_name,
+                llm_data.get("flaeche_qm"),
+                _txt(llm_data.get("typ")),
+                None if llm_data.get("ist_zum_kauf") is None else (1 if llm_data["ist_zum_kauf"] else 0),
+                None if llm_data.get("ist_makler") is None else (1 if llm_data["ist_makler"] else 0),
+                _txt(llm_data.get("meerblick")),
+                _txt(llm_data.get("zustand")),
+                json.dumps(llm_data.get("rote_flaggen") or [], ensure_ascii=False),
+                _txt(llm_data.get("zusammenfassung_de")),
+                _txt(llm_data.get("ort_im_inserat")),
+                _txt(grund_post),
+                inserat["id"],
+            ))
+            con.commit()
+
+            if grund_post:
+                immer_noch_gefiltert += 1
+                continue
+
+            if score >= score_schwelle:
+                treffer += 1
+                try:
+                    await sende_benachrichtigung(inserat, provider_name)
+                except Exception as e:
+                    log.warning("Telegram-Benachrichtigung fehlgeschlagen: %s", e)
+
+            await asyncio.sleep(pause)
+
+        await ctx.close()
+
+    con.close()
+    neu_bewertet = len(rows) - immer_noch_gefiltert
+    print(
+        f"\n✓ Fertig: {len(rows)} Inserate geprüft, "
+        f"{neu_bewertet} bestanden Filter, {treffer} Treffer gesendet."
+    )
+
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 HILFE = """
@@ -1263,6 +1439,8 @@ Verwendung:
                                          (Fallback wenn kein Display verfügbar)
   python3 agent.py --reset             — Datenbank leeren (neu scrapen beim nächsten Lauf)
   python3 agent.py --rescore           — Alle DB-Inserate mit aktuellen Kriterien neu bewerten
+  python3 agent.py --recheck-bilder    — Bilderzahl für 'zu_wenig_bilder'-Inserate neu scrapen
+                                         und danach komplett neu bewerten (inkl. LLM + Telegram)
   python3 agent.py --help              — Diese Hilfe
 
 Auto-Login (empfohlen):
@@ -1295,6 +1473,8 @@ if __name__ == "__main__":
         cmd_reset()
     elif "--rescore" in sys.argv:
         asyncio.run(cmd_rescore())
+    elif "--recheck-bilder" in sys.argv:
+        asyncio.run(cmd_recheck_bilder())
     else:
         cfg = lade_config()
         asyncio.run(agent_lauf(cfg))
