@@ -8,7 +8,7 @@
 provider = "ollama"
 
 [llm.ollama]
-model = "llama4"
+model = "qwen3:14b"
 host  = "http://localhost:11434"
 # Modellwahl nach RAM:
 #   llama3.1:8b   →  8 GB  (empfohlen für die meisten Server)
@@ -46,10 +46,15 @@ name   = "Dumanjug, Cebu"
 aktiv  = true
 url    = "https://www.facebook.com/marketplace/105574099476569/search?minPrice=100&maxPrice=8000000&query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
 
-# [[suche]]
-# name  = "Moalboal, Cebu"
-# aktiv = true
-# url   = "https://www.facebook.com/marketplace/ANDERE_ID/search/?category_id=1270772586445798&query=Immobilien%20zum%20Kauf"
+[[suche]]
+name   = "Panglao, Bohol"
+aktiv  = true
+url    = "https://www.facebook.com/marketplace/108028919225004/search/?minPrice=100&maxPrice=8000000&query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false&referral_ui_component=category_menu_item"
+
+[[suche]]
+name  = "Moalboal, Cebu"
+aktiv = true
+url   = "https://www.facebook.com/marketplace/106093392754984/search/?query=Immobilien%20zum%20Kauf&category_id=1270772586445798&exact=false"
 
 # [[suche]]
 # name  = "Badian, Cebu"
@@ -89,7 +94,7 @@ titel_blacklist = [
 
 # Weiche Kriterien — fließen in LLM-Score ein
 text = """
-Ich suche eine Immobilie zum Kauf in der Region Dumanjug, Cebu, Philippinen.
+Ich suche eine Immobilie zum Kauf auf Cebu, Philippinen.
 
 Meine Kriterien:
 - Preis: unter 8.000.000 PHP (ca. 80.000 EUR) bevorzugt
